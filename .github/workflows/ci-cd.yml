@@ -180,49 +180,16 @@ jobs:
       backend_url: ${{ steps.deploy-backend.outputs.url }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      # Authentication et déploiement backend inchangés...
 
-      - name: Google Auth
-        id: auth
-        uses: google-github-actions/auth@v1
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v1
-
-      - name: Configure Docker for GCP
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
-
-      - name: Create Artifact Registry repository if not exists
+      # DÉPLOIEMENT FRONTEND AMÉLIORÉ AVEC DIAGNOSTIC
+      - name: Debug - List workspace contents
         run: |
-          gcloud artifacts repositories describe library-management --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }} || \
-          gcloud artifacts repositories create library-management --repository-format=docker --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }}
+          pwd
+          ls -la
+          echo "Current directory structure:"
+          find . -type d -maxdepth 3 | sort
 
-      - name: Tag and push backend image to Google Artifact Registry
-        run: |
-          gcloud auth configure-docker --quiet
-          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          docker tag ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
-
-      - name: Deploy Backend to Cloud Run
-        id: deploy-backend
-        uses: google-github-actions/deploy-cloudrun@v1
-        with:
-          service: ${{ env.BACKEND_SERVICE_NAME }}
-          region: ${{ env.REGION }}
-          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
-
-      - name: Make Cloud Run service public
-        run: |
-          gcloud run services add-iam-policy-binding ${{ env.BACKEND_SERVICE_NAME }} \
-            --region=${{ env.REGION }} \
-            --member="allUsers" \
-            --role="roles/run.invoker"
-
-      # Déploiement du frontend (partie manquante)
       - name: Set up Node.js for Frontend Build
         uses: actions/setup-node@v3
         with:
@@ -230,36 +197,116 @@ jobs:
           cache: "npm"
           cache-dependency-path: "./frontend/package-lock.json"
 
+      - name: Debug - Check Next.js config
+        run: |
+          cat frontend/next.config.js
+          cat frontend/package.json
+
       - name: Install Frontend Dependencies
         working-directory: ./frontend
-        run: npm ci
+        run: |
+          npm ci
+          echo "Node modules installed:"
+          ls -la node_modules | head -n 10
 
-      - name: Build Frontend with Backend URL
+      - name: Modify Next.js config for static export if needed
+        working-directory: ./frontend
+        run: |
+          # Vérifier si la configuration contient déjà output: 'export'
+          if ! grep -q "output.*export" next.config.js; then
+            # Ajouter output: 'export' dans la configuration Next.js
+            sed -i "s/const nextConfig = {/const nextConfig = {\n  output: 'export',/" next.config.js
+            echo "Modified next.config.js to add static export configuration"
+          else
+            echo "Static export configuration already exists"
+          fi
+          cat next.config.js
+
+      - name: Build Frontend with Backend URL (Verbose)
         working-directory: ./frontend
         env:
           API_URL: ${{ steps.deploy-backend.outputs.url }}/api
+          NODE_OPTIONS: "--max-old-space-size=4096"
         run: |
+          echo "Backend URL: $API_URL"
           echo "API_URL=$API_URL" > .env.production
+          cat .env.production
+
+          # Build avec plus de détails
           npm run build
-          ls -la out/ || ls -la .next/ # Vérifier où sont les fichiers
 
-      - name: Create frontend bucket if not exists
-        run: |
-          gsutil ls -b gs://${{ env.FRONTEND_BUCKET }} || gsutil mb -l ${{ env.REGION }} gs://${{ env.FRONTEND_BUCKET }}
-          gsutil iam ch allUsers:objectViewer gs://${{ env.FRONTEND_BUCKET }}
+          # Diagnostiquer le répertoire de build
+          echo "Build directory contents:"
+          ls -la
 
-      - name: Deploy Frontend to Cloud Storage
-        run: |
-          # Chemin du répertoire de sortie (vérifier si c'est .next ou out)
-          FRONTEND_DIR="frontend/out"
-          if [ ! -d "$FRONTEND_DIR" ]; then
-            FRONTEND_DIR="frontend/.next"
+          if [ -d "out" ]; then
+            echo "out directory exists, contents:"
+            ls -la out/
+            FRONTEND_DIR="out"
+          elif [ -d ".next" ]; then
+            echo ".next directory exists, contents:"
+            ls -la .next/
+            FRONTEND_DIR=".next"
+          else
+            echo "ERROR: No build output directory found!"
+            exit 1
           fi
 
-          # Déployer les fichiers
-          gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || true
+          # Exporter la variable pour les étapes suivantes
+          echo "FRONTEND_DIR=$FRONTEND_DIR" >> $GITHUB_ENV
+
+      - name: Create and configure frontend bucket
+        run: |
+          echo "Checking if bucket exists..."
+          if gsutil ls -b gs://${{ env.FRONTEND_BUCKET }} 2>/dev/null; then
+            echo "Bucket exists"
+          else
+            echo "Creating bucket..."
+            gsutil mb -l ${{ env.REGION }} gs://${{ env.FRONTEND_BUCKET }}
+          fi
+
+          echo "Setting bucket permissions..."
+          gsutil iam ch allUsers:objectViewer gs://${{ env.FRONTEND_BUCKET }}
+
+          echo "Setting web configuration..."
+          gsutil web set -m index.html -e index.html gs://${{ env.FRONTEND_BUCKET }}
+
+          echo "Bucket configured:"
+          gsutil ls -L -b gs://${{ env.FRONTEND_BUCKET }}
+
+      - name: Deploy Frontend to Cloud Storage (Direct method)
+        working-directory: ./frontend
+        run: |
+          echo "Deploying frontend files from $FRONTEND_DIR directory"
+
+          # Clean bucket first
+          echo "Cleaning existing files in bucket..."
+          gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || echo "Bucket was empty or doesn't exist"
+
+          # Copy files with specific content types
+          echo "Copying HTML files..."
+          find $FRONTEND_DIR -name "*.html" -type f -exec gsutil -h "Content-Type:text/html" cp {} gs://${{ env.FRONTEND_BUCKET }}/{} \;
+
+          echo "Copying JS files..."
+          find $FRONTEND_DIR -name "*.js" -type f -exec gsutil -h "Content-Type:application/javascript" cp {} gs://${{ env.FRONTEND_BUCKET }}/{} \;
+
+          echo "Copying CSS files..."
+          find $FRONTEND_DIR -name "*.css" -type f -exec gsutil -h "Content-Type:text/css" cp {} gs://${{ env.FRONTEND_BUCKET }}/{} \;
+
+          echo "Copying all other files..."
           gsutil -m cp -r $FRONTEND_DIR/* gs://${{ env.FRONTEND_BUCKET }}/
-          gsutil web set -m index.html gs://${{ env.FRONTEND_BUCKET }}
+
+          # Verify deployment
+          echo "Files in bucket:"
+          gsutil ls -r gs://${{ env.FRONTEND_BUCKET }}/
+
+          # Test if index.html exists
+          if gsutil stat gs://${{ env.FRONTEND_BUCKET }}/index.html 2>/dev/null; then
+            echo "index.html exists in bucket"
+          else
+            echo "ERROR: index.html not found in bucket!"
+            exit 1
+          fi
 
   operate:
     name: Operate
