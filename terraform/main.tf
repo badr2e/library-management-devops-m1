@@ -53,11 +53,11 @@ resource "google_firestore_database" "database" {
 
 # Artifact Registry pour stocker les images Docker
 resource "google_artifact_registry_repository" "repository" {
-  provider = google
-  location = var.region
+  provider      = google
+  location      = var.region
   repository_id = "library-management"
-  description = "Repository pour les images Docker de l'application de gestion de bibliothèque"
-  format = "DOCKER"
+  description   = "Repository pour les images Docker de l'application de gestion de bibliothèque"
+  format        = "DOCKER"
 
   depends_on = [google_project_service.artifactregistry]
 }

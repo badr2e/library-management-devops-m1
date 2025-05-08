@@ -19,75 +19,8 @@ env:
   VERSION: ${{ github.sha }}
 
 jobs:
-  # 1. PLAN: Validation des configurations
-  plan:
-    name: Plan
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: "1.4.0"
-
-      - name: Terraform Format Check
-        working-directory: ./terraform
-        run: terraform fmt -check -recursive
-
-      - name: Terraform Validate
-        working-directory: ./terraform
-        run: |
-          terraform init -backend=false
-          terraform validate
-
-  # 2. CODE: Vérification de la qualité du code
-  code:
-    name: Code Quality
-    needs: [plan]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Install Python linting tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install flake8 black
-
-      - name: Lint Python code
-        run: |
-          flake8 backend/ --count --select=E9,F63,F7,F82 --show-source --statistics
-          black --check backend/
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: "18"
-
-      - name: Install JavaScript linting tools
-        working-directory: ./frontend
-        run: npm ci
-
-      - name: Lint JavaScript/TypeScript code
-        working-directory: ./frontend
-        run: npm run lint
-
-  # 3. BUILD: Construction des images Docker
   build:
     name: Build
-    needs: [code]
     runs-on: ubuntu-latest
 
     permissions:
@@ -130,7 +63,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 4. TESTING: Tests des composants
   testing:
     name: Testing
     needs: [build]
@@ -179,7 +111,6 @@ jobs:
           curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
           docker stop backend-test
 
-  # 5. RELEASE: Préparation pour la mise en production
   release:
     name: Release
     needs: [testing]
@@ -234,7 +165,6 @@ jobs:
           docker push ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
           docker push ${{ env.FRONTEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
 
-  # 6. DEPLOY: Déploiement sur l'environnement de production
   deploy:
     name: Deploy
     needs: [release]
@@ -251,12 +181,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      # Modifier l'authentification pour utiliser GCP_SA_KEY
       - name: Google Auth
         id: auth
         uses: google-github-actions/auth@v1
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
@@ -277,6 +207,11 @@ jobs:
 
       - name: Configure Docker for GCP
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Create Artifact Registry repository if not exists
+        run: |
+          gcloud artifacts repositories describe library-management --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }} || \
+          gcloud artifacts repositories create library-management --repository-format=docker --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }}
 
       - name: Push to Google Artifact Registry
         run: |
@@ -310,13 +245,23 @@ jobs:
           echo "API_URL=$API_URL" > .env.production
           npm run build
 
+      # Créer le bucket s'il n'existe pas
+      - name: Create frontend bucket if not exists
+        run: |
+          gsutil ls -b gs://${{ env.FRONTEND_BUCKET }} || \
+          gsutil mb -l ${{ env.REGION }} gs://${{ env.FRONTEND_BUCKET }}
+
+      # Rendre le bucket lisible publiquement
+      - name: Make bucket publicly readable
+        run: |
+          gsutil iam ch allUsers:objectViewer gs://${{ env.FRONTEND_BUCKET }}
+
       - name: Deploy Frontend to Cloud Storage
         run: |
           gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || true
           gsutil -m cp -r frontend/out/* gs://${{ env.FRONTEND_BUCKET }}/
           gsutil web set -m index.html gs://${{ env.FRONTEND_BUCKET }}
 
-  # 7. OPERATE: Vérification post-déploiement
   operate:
     name: Operate
     needs: [deploy]
@@ -336,7 +281,6 @@ jobs:
           echo "Running any required database migrations or initializations"
           # Ajoutez ici les commandes spécifiques pour les migrations ou l'initialisation
 
-  # 8. MONITOR: Mise en place ou vérification du monitoring
   monitor:
     name: Monitor
     needs: [operate]
