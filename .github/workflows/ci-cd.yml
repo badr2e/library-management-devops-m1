@@ -109,16 +109,16 @@ jobs:
 
       - name: Pull and test backend container
         env:
-          TESTING: "true" # Pour éviter les erreurs Firestore
-          PROJECT_ID: "dummy-project" # Pour éviter les erreurs d'identification GCP
+          TESTING: "true"
+          PROJECT_ID: "dummy-project"
         run: |
           docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
           docker run --name backend-test -d -p 8080:8080 \
             -e TESTING=true \
             -e PROJECT_ID=dummy-project \
             ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          sleep 15  # Augmenter le délai d'attente
-          docker logs backend-test  # Afficher les logs pour diagnostic
+          sleep 15
+          docker logs backend-test
           curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
           docker stop backend-test
 
@@ -215,6 +215,52 @@ jobs:
           region: ${{ env.REGION }}
           image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
 
+      - name: Make Cloud Run service public
+        run: |
+          gcloud run services add-iam-policy-binding ${{ env.BACKEND_SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --member="allUsers" \
+            --role="roles/run.invoker"
+
+      # Déploiement du frontend (partie manquante)
+      - name: Set up Node.js for Frontend Build
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: "./frontend/package-lock.json"
+
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build Frontend with Backend URL
+        working-directory: ./frontend
+        env:
+          API_URL: ${{ steps.deploy-backend.outputs.url }}/api
+        run: |
+          echo "API_URL=$API_URL" > .env.production
+          npm run build
+          ls -la out/ || ls -la .next/ # Vérifier où sont les fichiers
+
+      - name: Create frontend bucket if not exists
+        run: |
+          gsutil ls -b gs://${{ env.FRONTEND_BUCKET }} || gsutil mb -l ${{ env.REGION }} gs://${{ env.FRONTEND_BUCKET }}
+          gsutil iam ch allUsers:objectViewer gs://${{ env.FRONTEND_BUCKET }}
+
+      - name: Deploy Frontend to Cloud Storage
+        run: |
+          # Chemin du répertoire de sortie (vérifier si c'est .next ou out)
+          FRONTEND_DIR="frontend/out"
+          if [ ! -d "$FRONTEND_DIR" ]; then
+            FRONTEND_DIR="frontend/.next"
+          fi
+
+          # Déployer les fichiers
+          gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || true
+          gsutil -m cp -r $FRONTEND_DIR/* gs://${{ env.FRONTEND_BUCKET }}/
+          gsutil web set -m index.html gs://${{ env.FRONTEND_BUCKET }}
+
   operate:
     name: Operate
     needs: [deploy]
@@ -246,8 +292,7 @@ jobs:
       - name: Google Auth
         uses: google-github-actions/auth@v1
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
