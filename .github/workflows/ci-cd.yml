@@ -130,7 +130,6 @@ jobs:
 
     permissions:
       contents: write
-      packages: write
 
     steps:
       - name: Checkout code
@@ -168,15 +167,6 @@ jobs:
               prerelease: false
             })
 
-      - name: Update image tags with release version
-        run: |
-          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          docker pull ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }}
-          docker tag ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }} ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
-          docker tag ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }} ${{ env.FRONTEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
-          docker push ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
-          docker push ${{ env.FRONTEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
-
   deploy:
     name: Deploy
     needs: [release]
@@ -193,7 +183,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Modifier l'authentification pour utiliser GCP_SA_KEY
       - name: Google Auth
         id: auth
         uses: google-github-actions/auth@v1
@@ -203,20 +192,6 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pull release images
-        run: |
-          docker pull ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
-
       - name: Configure Docker for GCP
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
 
@@ -225,10 +200,12 @@ jobs:
           gcloud artifacts repositories describe library-management --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }} || \
           gcloud artifacts repositories create library-management --repository-format=docker --location=${{ env.REGION }} --project=${{ env.PROJECT_ID }}
 
-      - name: Push to Google Artifact Registry
+      - name: Tag and push backend image to Google Artifact Registry
         run: |
-          docker tag ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
-          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
+          gcloud auth configure-docker --quiet
+          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          docker tag ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
 
       - name: Deploy Backend to Cloud Run
         id: deploy-backend
@@ -236,43 +213,7 @@ jobs:
         with:
           service: ${{ env.BACKEND_SERVICE_NAME }}
           region: ${{ env.REGION }}
-          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
-
-      - name: Set up Node.js for Frontend Build
-        uses: actions/setup-node@v3
-        with:
-          node-version: "18"
-          cache: "npm"
-          cache-dependency-path: "./frontend/package-lock.json"
-
-      - name: Install Frontend Dependencies
-        working-directory: ./frontend
-        run: npm ci
-
-      - name: Build Frontend with Backend URL
-        working-directory: ./frontend
-        env:
-          API_URL: ${{ steps.deploy-backend.outputs.url }}/api
-        run: |
-          echo "API_URL=$API_URL" > .env.production
-          npm run build
-
-      # Créer le bucket s'il n'existe pas
-      - name: Create frontend bucket if not exists
-        run: |
-          gsutil ls -b gs://${{ env.FRONTEND_BUCKET }} || \
-          gsutil mb -l ${{ env.REGION }} gs://${{ env.FRONTEND_BUCKET }}
-
-      # Rendre le bucket lisible publiquement
-      - name: Make bucket publicly readable
-        run: |
-          gsutil iam ch allUsers:objectViewer gs://${{ env.FRONTEND_BUCKET }}
-
-      - name: Deploy Frontend to Cloud Storage
-        run: |
-          gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || true
-          gsutil -m cp -r frontend/out/* gs://${{ env.FRONTEND_BUCKET }}/
-          gsutil web set -m index.html gs://${{ env.FRONTEND_BUCKET }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:${{ env.VERSION }}
 
   operate:
     name: Operate
