@@ -108,10 +108,17 @@ jobs:
         run: npm test
 
       - name: Pull and test backend container
+        env:
+          TESTING: "true" # Pour éviter les erreurs Firestore
+          PROJECT_ID: "dummy-project" # Pour éviter les erreurs d'identification GCP
         run: |
           docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          docker run --name backend-test -d -p 8080:8080 ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          sleep 5
+          docker run --name backend-test -d -p 8080:8080 \
+            -e TESTING=true \
+            -e PROJECT_ID=dummy-project \
+            ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          sleep 15  # Augmenter le délai d'attente
+          docker logs backend-test  # Afficher les logs pour diagnostic
           curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
           docker stop backend-test
 
