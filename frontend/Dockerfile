@@ -1,5 +1,5 @@
 # Étape de build
-FROM node:18-alpine AS build
+FROM node:18-alpine
 
 WORKDIR /app
 
@@ -10,15 +10,8 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Étape de production avec Nginx
-FROM nginx:alpine
+# Exposer le port
+EXPOSE 3000
 
-# Copier le build du frontend
-COPY --from=build /app/out /usr/share/nginx/html
-
-# Configuration de Nginx
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80
-
-CMD ["nginx", "-g", "daemon off;"]
+# Commande de démarrage
+CMD ["npm", "start"]
