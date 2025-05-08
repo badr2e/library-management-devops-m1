@@ -245,7 +245,7 @@ jobs:
           region: ${{ env.REGION }}
           image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.FRONTEND_IMAGE_NAME }}:${{ env.VERSION }}
           env_vars: |
-            API_URL=${{ steps.deploy-backend.outputs.url }}/api
+            NEXT_PUBLIC_API_URL=${{ steps.deploy-backend.outputs.url }}/api
 
       - name: Make Frontend service public
         run: |
