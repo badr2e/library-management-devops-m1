@@ -1,0 +1,381 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  BACKEND_IMAGE_NAME: library-backend
+  FRONTEND_IMAGE_NAME: library-frontend
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/library-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/library-frontend
+  REGION: europe-west1
+  BACKEND_SERVICE_NAME: library-backend
+  FRONTEND_BUCKET: ${{ secrets.GCP_PROJECT_ID }}-frontend
+  VERSION: ${{ github.sha }}
+
+jobs:
+  # 1. PLAN: Validation des configurations
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.4.0"
+
+      - name: Terraform Format Check
+        working-directory: ./terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        working-directory: ./terraform
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+  # 2. CODE: Vérification de la qualité du code
+  code:
+    name: Code Quality
+    needs: [plan]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Python linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black
+
+      - name: Lint Python code
+        run: |
+          flake8 backend/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          black --check backend/
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+
+      - name: Install JavaScript linting tools
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Lint JavaScript/TypeScript code
+        working-directory: ./frontend
+        run: npm run lint
+
+  # 3. BUILD: Construction des images Docker
+  build:
+    name: Build
+    needs: [code]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+            ${{ env.BACKEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }}
+            ${{ env.FRONTEND_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 4. TESTING: Tests des composants
+  testing:
+    name: Testing
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pytest-cov
+
+      - name: Run backend tests
+        working-directory: ./backend
+        run: pytest -v --cov=./ --cov-report=xml
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: "./frontend/package-lock.json"
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: ./frontend
+        run: npm test
+
+      - name: Pull and test backend container
+        run: |
+          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          docker run --name backend-test -d -p 8080:8080 ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          sleep 5
+          curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
+          docker stop backend-test
+
+  # 5. RELEASE: Préparation pour la mise en production
+  release:
+    name: Release
+    needs: [testing]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set Release version
+        id: set_version
+        run: |
+          VERSION=$(date +'%Y.%m.%d')-${{ github.run_number }}
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release Tag
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/v${{ env.RELEASE_VERSION }}',
+              sha: context.sha
+            })
+
+      - name: Create Release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: 'v${{ env.RELEASE_VERSION }}',
+              name: 'Release v${{ env.RELEASE_VERSION }}',
+              body: 'Release of version ${{ env.RELEASE_VERSION }}',
+              draft: false,
+              prerelease: false
+            })
+
+      - name: Update image tags with release version
+        run: |
+          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          docker pull ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }}
+          docker tag ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }} ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
+          docker tag ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }} ${{ env.FRONTEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
+          docker push ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
+          docker push ${{ env.FRONTEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
+
+  # 6. DEPLOY: Déploiement sur l'environnement de production
+  deploy:
+    name: Deploy
+    needs: [release]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      backend_url: ${{ steps.deploy-backend.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull release images
+        run: |
+          docker pull ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }}
+
+      - name: Configure Docker for GCP
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Push to Google Artifact Registry
+        run: |
+          docker tag ${{ env.BACKEND_IMAGE }}:v${{ env.RELEASE_VERSION }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
+
+      - name: Deploy Backend to Cloud Run
+        id: deploy-backend
+        uses: google-github-actions/deploy-cloudrun@v1
+        with:
+          service: ${{ env.BACKEND_SERVICE_NAME }}
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/library-management/${{ env.BACKEND_IMAGE_NAME }}:v${{ env.RELEASE_VERSION }}
+
+      - name: Set up Node.js for Frontend Build
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: "./frontend/package-lock.json"
+
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build Frontend with Backend URL
+        working-directory: ./frontend
+        env:
+          API_URL: ${{ steps.deploy-backend.outputs.url }}/api
+        run: |
+          echo "API_URL=$API_URL" > .env.production
+          npm run build
+
+      - name: Deploy Frontend to Cloud Storage
+        run: |
+          gsutil -m rm -r gs://${{ env.FRONTEND_BUCKET }}/** || true
+          gsutil -m cp -r frontend/out/* gs://${{ env.FRONTEND_BUCKET }}/
+          gsutil web set -m index.html gs://${{ env.FRONTEND_BUCKET }}
+
+  # 7. OPERATE: Vérification post-déploiement
+  operate:
+    name: Operate
+    needs: [deploy]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify Backend Health
+        run: |
+          curl --retry 10 --retry-delay 10 --retry-connrefused ${{ needs.deploy.outputs.backend_url }}/api/health || exit 1
+
+      - name: Verify Frontend Deployment
+        run: |
+          curl --retry 5 --retry-delay 5 --retry-connrefused https://storage.googleapis.com/${{ env.FRONTEND_BUCKET }}/index.html -o /dev/null -w '%{http_code}\n' | grep -q 200 || exit 1
+
+      - name: Apply Database Migrations or Initialization (if any)
+        run: |
+          echo "Running any required database migrations or initializations"
+          # Ajoutez ici les commandes spécifiques pour les migrations ou l'initialisation
+
+  # 8. MONITOR: Mise en place ou vérification du monitoring
+  monitor:
+    name: Monitor
+    needs: [operate]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Google Auth
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+
+      - name: Setup Monitoring Alerts (if not already set up)
+        run: |
+          echo "Setting up or verifying monitoring alerts"
+          # Vérifier si des alertes existent déjà
+          gcloud monitoring channels describe default --project=${{ env.PROJECT_ID }} || \
+          gcloud monitoring channels create --display-name=default --description="Default notification channel" --project=${{ env.PROJECT_ID }}
+
+      - name: Configure Cloud Run Monitoring
+        run: |
+          echo "Setting up Cloud Run monitoring"
+          # Configurer la surveillance de Cloud Run
+          # Par exemple, configurer des alertes sur la latence, les erreurs HTTP 5xx, etc.
+
+      - name: Deploy Health Dashboard (if available)
+        run: |
+          echo "Deploying or verifying application health dashboard"
+          # Déployer ou vérifier un tableau de bord de surveillance
+
+      - name: Send Deployment Notification
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+            -d '{"text":"🚀 **Deployment Successful**\nVersion: v${{ env.RELEASE_VERSION }}\nBackend: ${{ needs.deploy.outputs.backend_url }}\nFrontend: https://storage.googleapis.com/${{ env.FRONTEND_BUCKET }}/index.html"}' \
+            ${{ secrets.WEBHOOK_URL || 'https://example.com' }}
+          echo "Deployment of v${{ env.RELEASE_VERSION }} completed successfully"
