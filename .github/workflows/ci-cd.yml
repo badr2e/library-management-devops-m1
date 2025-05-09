@@ -19,10 +19,57 @@ env:
   VERSION: ${{ github.sha }}
 
 jobs:
-  build:
-    name: Build
+  code-quality:
+    name: Code Quality & Security
     runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python quality tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 bandit safety pylint mypy
+
+      - name: Run Python linting
+        working-directory: ./backend
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          pylint --disable=all --enable=unused-import,unused-variable,redefined-outer-name,reimported models routes services
+
+      - name: Run Python security scan
+        working-directory: ./backend
+        run: |
+          bandit -r . -ll -ii -x tests/
+          safety check -r requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: "./frontend/package-lock.json"
+
+      - name: Install Node.js quality tools
+        working-directory: ./frontend
+        run: |
+          npm install -g eslint prettier eslint-plugin-react eslint-plugin-react-hooks eslint-plugin-jsx-a11y
+
+      - name: Run JavaScript/TypeScript linting
+        working-directory: ./frontend
+        run: |
+          npx eslint . --ext .js,.jsx,.ts,.tsx
+
+  build-backend:
+    name: Build Backend
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -51,6 +98,29 @@ jobs:
             ${{ env.BACKEND_IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            PROJECT_ID=${{ env.PROJECT_ID }}
+
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push frontend image
         uses: docker/build-push-action@v4
@@ -62,10 +132,12 @@ jobs:
             ${{ env.FRONTEND_IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.API_URL || 'https://library-backend-service-url/api' }}
 
-  testing:
-    name: Testing
-    needs: [build]
+  test-backend:
+    name: Test Backend
+    needs: [build-backend]
     runs-on: ubuntu-latest
 
     steps:
@@ -82,15 +154,46 @@ jobs:
         working-directory: ./backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest pytest-cov
+          pip install -r requirements.txt pytest pytest-cov pytest-mock
 
-      - name: Run backend tests
+      - name: Run backend unit tests
         working-directory: ./backend
         env:
           TESTING: "true"
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)
-          pytest -v --cov=./ --cov-report=xml
+          pytest -v --cov=./ --cov-report=xml --cov-report=term-missing
+
+      - name: Pull and test backend container
+        env:
+          TESTING: "true"
+          PROJECT_ID: "dummy-project"
+        run: |
+          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          docker run --name backend-test -d -p 8080:8080 \
+            -e TESTING=true \
+            -e PROJECT_ID=dummy-project \
+            ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
+          sleep 10
+          docker logs backend-test
+          curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
+          docker stop backend-test
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          directory: ./backend
+          flags: backend
+          name: backend-codecov
+
+  test-frontend:
+    name: Test Frontend
+    needs: [build-frontend]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -106,34 +209,33 @@ jobs:
       - name: Run frontend tests
         working-directory: ./frontend
         run: |
-          if [ -f "package.json" ] && grep -q '"test"' package.json; then
-            npm test
-          else
-            echo "No test script found, skipping frontend tests"
-            exit 0
-          fi
+          npm test -- --coverage
 
-      - name: Pull and test backend container
-        env:
-          TESTING: "true"
-          PROJECT_ID: "dummy-project"
+      - name: Test frontend build
+        working-directory: ./frontend
         run: |
-          docker pull ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          docker run --name backend-test -d -p 8080:8080 \
-            -e TESTING=true \
-            -e PROJECT_ID=dummy-project \
-            ${{ env.BACKEND_IMAGE }}:${{ env.VERSION }}
-          sleep 15
-          docker logs backend-test
-          curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:8080/api/health || exit 1
-          docker stop backend-test
+          npm run build
+
+      - name: Pull and test frontend container
+        run: |
+          docker pull ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }}
+          docker run --name frontend-test -d -p 3000:3000 ${{ env.FRONTEND_IMAGE }}:${{ env.VERSION }}
+          sleep 10
+          curl --retry 5 --retry-delay 5 --retry-connrefused http://localhost:3000 -o /dev/null -w '%{http_code}\n' | grep -q "200\|301\|302" || exit 1
+          docker stop frontend-test
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          directory: ./frontend
+          flags: frontend
+          name: frontend-codecov
 
   release:
     name: Release
-    needs: [testing]
-    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
@@ -177,7 +279,6 @@ jobs:
     name: Deploy
     needs: [release]
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       id-token: write
@@ -254,60 +355,24 @@ jobs:
             --member="allUsers" \
             --role="roles/run.invoker"
 
-  operate:
-    name: Operate
-    needs: [deploy]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Verify Backend Health
-        run: |
-          curl --retry 10 --retry-delay 10 --retry-connrefused ${{ needs.deploy.outputs.backend_url }}/api/health || exit 1
-
-      - name: Verify Frontend Deployment
-        run: |
-          curl --retry 10 --retry-delay 10 --retry-connrefused ${{ needs.deploy.outputs.frontend_url }} -o /dev/null -w '%{http_code}\n' | grep -q "200\|301\|302" || exit 1
-
       - name: Apply Database Migrations or Initialization (if any)
         run: |
           echo "Running any required database migrations or initializations"
           # Ajoutez ici les commandes spécifiques pour les migrations ou l'initialisation
 
-  monitor:
-    name: Monitor
-    needs: [operate]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Google Auth
-        uses: google-github-actions/auth@v1
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Set up Cloud SDK with beta components
-        uses: google-github-actions/setup-gcloud@v1
-        with:
-          install_components: "beta" # Installer les composants beta nécessaires
-
-      - name: Setup Monitoring Alerts
+      - name: Set up Cloud Monitoring
         run: |
-          echo "Setting up or verifying monitoring alerts"
-          # Utiliser la commande beta correcte
-          gcloud beta monitoring channels describe default --project=${{ env.PROJECT_ID }} || \
-          gcloud beta monitoring channels create --display-name=default --description="Default notification channel" --project=${{ env.PROJECT_ID }} || \
-          echo "Skipping monitoring channel setup"
+          gcloud run services update ${{ env.BACKEND_SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --set-cloudrun-observability
 
-      - name: Configure Cloud Run Monitoring
-        run: |
-          echo "Setting up basic Cloud Run monitoring"
-          # Échantillon de commande pour créer une alerte simple (à adapter selon vos besoins)
-          echo "Configuring basic uptime check and CPU utilization alerts"
+          gcloud run services update ${{ env.FRONTEND_SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --set-cloudrun-observability
 
-      - name: Send Deployment Notification
+      - name: Create Deployment Success Notification
+        if: success()
         run: |
           echo "🚀 Deployment of v${{ env.RELEASE_VERSION }} completed successfully"
-          echo "Backend URL: ${{ needs.deploy.outputs.backend_url }}"
-          echo "Frontend URL: ${{ needs.deploy.outputs.frontend_url }}"
+          echo "Backend URL: ${{ steps.deploy-backend.outputs.url }}"
+          echo "Frontend URL: ${{ steps.deploy-frontend.outputs.url }}"
