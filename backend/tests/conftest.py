@@ -1,7 +1,8 @@
 import pytest
-from unittest.mock import MagicMock, patch
-import sys
-import os
+
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
 
 # Patch firestore client
 @pytest.fixture(autouse=True)
@@ -11,17 +12,19 @@ def mock_firestore_client():
         mock_client.return_value = mock_db
         yield mock_db
 
+
 # Maintenant importer l'app après le mock
 @pytest.fixture
 def app():
     from app import create_app
     from config import Config
-    
+
     class TestConfig(Config):
         TESTING = True
-        
+
     app = create_app(TestConfig)
     yield app
+
 
 @pytest.fixture
 def client(app):
