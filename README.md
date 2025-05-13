@@ -20,8 +20,7 @@ Un système complet pour gérer les livres, les membres et les emprunts d'une bi
 
 ### Infrastructure & Déploiement
 
-- Google Cloud Platform
-- Terraform
+- Google Cloud Platform (Cloud Run, Artifact Registry)
 - Docker
 - GitHub Actions (CI/CD)
 
@@ -39,6 +38,7 @@ Un système complet pour gérer les livres, les membres et les emprunts d'une bi
 │   └── Dockerfile              # Configuration Docker
 │
 ├── frontend/                   # Application Next.js
+│   ├── __tests__               # Tests frontend
 │   ├── src/
 │   │   ├── app/                # Pages de l'application
 │   │   ├── components/         # Composants React
@@ -47,11 +47,6 @@ Un système complet pour gérer les livres, les membres et les emprunts d'une bi
 │   ├── public/                 # Fichiers statiques
 │   ├── package.json            # Dépendances JavaScript
 │   └── next.config.js          # Configuration Next.js
-│
-├── terraform/                  # Infrastructure as Code
-│   ├── main.tf                 # Configuration principale
-│   ├── variables.tf            # Définition des variables
-│   └── terraform.tfvars        # Valeurs des variables
 │
 └── .github/
     └── workflows/              # Workflows GitHub Actions
@@ -77,8 +72,8 @@ Un système complet pour gérer les livres, les membres et les emprunts d'une bi
 
 ```bash
 # Cloner le dépôt
-git clone https://github.com/username/library-management-system.git
-cd library-management-system/backend
+git clone https://github.com/badr2e/library-management-devops-m1.git
+cd library-management-devops-m1/backend
 
 # Créer un environnement virtuel
 python -m venv venv
@@ -99,7 +94,7 @@ flask run
 
 ```bash
 # Dans un nouveau terminal
-cd library-management-system/frontend
+cd library-management-devops-m1/frontend
 
 # Installer les dépendances
 npm install
@@ -114,13 +109,24 @@ npm run dev
 
 ## Déploiement
 
-Le déploiement est automatisé via GitHub Actions et Terraform. Consultez le guide de déploiement dans le dossier `terraform/` pour plus de détails.
+Le déploiement est automatisé via GitHub Actions. Le pipeline CI/CD gère la construction, les tests et le déploiement des applications frontend et backend sur Google Cloud Platform.
 
 ### Configuration du déploiement
 
-1. Configurer le projet Google Cloud et activer les APIs nécessaires
-2. Configurer les secrets GitHub Actions
+1. Configurer le projet Google Cloud et activer les APIs nécessaires (Cloud Run, Artifact Registry)
+2. Configurer les secrets GitHub Actions suivants :
+   - `GCP_PROJECT_ID` : L'ID de votre projet Google Cloud
+   - `GCP_SA_KEY` : La clé JSON de votre compte de service GCP avec les permissions nécessaires
 3. Pousser vers la branche main pour déclencher le déploiement automatique
+
+### Pipeline CI/CD
+
+Notre pipeline CI/CD comprend les étapes suivantes :
+1. Construction des images Docker du frontend et du backend
+2. Exécution des tests automatisés
+3. Publication des images sur Google Artifact Registry
+4. Déploiement sur Google Cloud Run
+5. Vérification post-déploiement et configuration de la surveillance
 
 ## Documentation API
 
