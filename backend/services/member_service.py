@@ -21,7 +21,7 @@ def get_member_by_id(member_id):
     return None
 
 
-def create_new_member(first_name, last_name, email, phone=None, address=None, 
+def create_new_member(first_name, last_name, email, phone=None, address=None,
                       id_card_number=None):
     member = Member(
         first_name=first_name,
