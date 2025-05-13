@@ -1,6 +1,10 @@
 from datetime import datetime
+
 from models import db
-from models.book import Book, COLLECTION_NAME
+
+from models.book import COLLECTION_NAME
+from models.book import Book
+
 
 def get_all_books():
     books = []
@@ -9,13 +13,16 @@ def get_all_books():
         books.append(book)
     return books
 
+
 def get_book_by_id(book_id):
     doc = db.collection(COLLECTION_NAME).document(book_id).get()
     if doc.exists:
         return Book.from_dict(doc.to_dict(), doc.id)
     return None
 
-def create_new_book(title, author, isbn=None, publication_year=None, category=None, description=None):
+
+def create_new_book(title, author, isbn=None, publication_year=None,
+                    category=None, description=None):
     book = Book(
         title=title,
         author=author,
@@ -27,14 +34,17 @@ def create_new_book(title, author, isbn=None, publication_year=None, category=No
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
     )
-    
+
     doc_ref = db.collection(COLLECTION_NAME).document()
     doc_ref.set(book.to_dict())
     book.id = doc_ref.id
-    
+
     return book
 
-def update_existing_book(book, title=None, author=None, isbn=None, publication_year=None, category=None, description=None, is_available=None):
+
+def update_existing_book(book, title=None, author=None, isbn=None,
+                         publication_year=None, category=None,
+                         description=None, is_available=None):
     if title:
         book.title = title
     if author:
@@ -49,13 +59,14 @@ def update_existing_book(book, title=None, author=None, isbn=None, publication_y
         book.description = description
     if is_available is not None:
         book.is_available = is_available
-    
+
     book.updated_at = datetime.utcnow()
-    
+
     doc_ref = db.collection(COLLECTION_NAME).document(book.id)
     doc_ref.update(book.to_dict())
-    
+
     return book
+
 
 def delete_existing_book(book):
     db.collection(COLLECTION_NAME).document(book.id).delete()
