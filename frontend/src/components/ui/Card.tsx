@@ -6,7 +6,7 @@ interface CardProps {
   className?: string;
 }
 
-const Card: React.FC<CardProps> = ({ children, title, className = "" }) => {
+const Card : React.FC<CardProps> = ({ children, title, className = "" }) => {
   return (
     <div
       className={`bg-white rounded-lg shadow-md overflow-hidden ${className}`}
